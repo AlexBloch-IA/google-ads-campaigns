@@ -1,0 +1,107 @@
+{
+  "campaign": "acme-widgets_us_search_demo",
+  "segment": "acme-widgets",
+  "final_url": "https://example.com/lp/acme-widgets",
+  "network": "Search",
+  "language": "english",
+  "currency": "USD",
+  "geo": {
+    "country_code": "US",
+    "locale": "en",
+    "include": ["United States"],
+    "exclude": ["Hawaii"],
+    "note": "Contiguous states only at launch. Excluded zones are also blocked as negative keywords (see negative_keywords)."
+  },
+  "bidding": "MaximizeConversions",
+  "monthly_budget": 300,
+  "daily_budget": 9.87,
+  "budget_share": "100%",
+  "budget_rationale": "Single launch segment. daily = 300 / 30.4 = 9.868 -> 9.87.",
+  "ad_schedule": {
+    "account_timezone": "America/New_York",
+    "note": "All windows are expressed in the ACCOUNT timezone, never in the target's local time.",
+    "windows": [
+      {
+        "days": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+        "start": "08:00",
+        "end": "19:00",
+        "target": "business hours"
+      },
+      {
+        "days": ["SATURDAY"],
+        "start": "10:07",
+        "end": "23:59",
+        "target": "deliberately unrounded — dry-run reports 10:00 -> 24:00"
+      }
+    ]
+  },
+  "ad_groups": [
+    {
+      "name": "acme-widgets-core",
+      "keywords": {
+        "exact": [
+          "[acme widget rental]",
+          "[industrial widget supplier]",
+          "[widget maintenance contract]"
+        ],
+        "phrase": [
+          "\"widget rental for business\"",
+          "\"managed widget service\"",
+          "\"widget installation and upkeep\""
+        ],
+        "broad": []
+      },
+      "rsa": {
+        "headlines": [
+          "Widgets, Fully Managed",
+          "Rent, Don't Buy Widgets",
+          "Installed And Maintained",
+          "One Monthly Fee",
+          "Call Back Within 24h",
+          "Built For Multi-Site Teams",
+          "Simple, Reliable, Compliant"
+        ],
+        "descriptions": [
+          "Widgets installed, maintained and monitored for you. One predictable monthly fee.",
+          "No purchase, no capex. We handle install, upkeep and reporting across all your sites.",
+          "Request a call back within 24 hours and get a quote tailored to your sites."
+        ],
+        "paths": ["Widgets", "Managed"]
+      }
+    }
+  ],
+  "negative_keywords": [
+    "free", "cheap", "price", "prices", "pricing", "cost", "how much", "discount", "coupon", "promo",
+    "job", "jobs", "hiring", "salary", "career", "internship", "training", "course", "certification", "class",
+    "parts", "spare parts", "battery", "replacement", "repair", "manual", "user guide", "how to use", "diy", "refurbished",
+    "amazon", "ebay", "alibaba", "aliexpress", "craigslist", "marketplace", "wholesale directory",
+    "for home", "personal use", "definition", "what is", "wikipedia", "forum",
+    "hawaii"
+  ],
+  "extensions": {
+    "sitelinks": [
+      {
+        "text": "Get a call back",
+        "url": "https://example.com/lp/acme-widgets#contact",
+        "desc1": "Within 24 hours",
+        "desc2": "An advisor calls you"
+      },
+      {
+        "text": "Fully managed",
+        "url": "https://example.com/lp/acme-widgets#service",
+        "desc1": "Installed and maintained",
+        "desc2": "No purchase required"
+      }
+    ],
+    "callouts": ["Fully managed", "No purchase", "Call back in 24h", "Multi-site ready"],
+    "structured_snippets": {
+      "header": "Services",
+      "values": ["Installation", "Maintenance", "Monitoring", "Reporting"]
+    },
+    "call": {
+      "phone": "+1 555 0100",
+      "phone_href": "+15550100",
+      "country": "US"
+    }
+  }
+}
