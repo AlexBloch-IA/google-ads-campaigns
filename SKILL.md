@@ -25,10 +25,10 @@ A campaign is a versioned artifact: an agent writes the spec, a human reads the 
 | Invalid config | Missing cap, prefix, or sheet URL, a wrong type, or unreadable spend: the run **throws before any pause or write** and the script runner reports the failure. Never falls back to "every campaign" |
 | Leaves the machine | Only on the mutating path: the campaign tree, to the ad network you authenticated against |
 | Spend authority | None. Every campaign is created PAUSED. Going live is a human click in the vendor UI |
-| Prerequisites (mutating path) | A dedicated virtualenv with `pip install "google-ads==33.0.0"` (the script refuses `--apply` on any other version); a manager (MCC) account; a developer token with **basic or standard** API access approved by the vendor — the default *test* level cannot write to a production account and approval takes days; an OAuth desktop client and refresh token generated elsewhere |
+| Prerequisites (mutating path) | A dedicated virtualenv with `pip install "google-ads==33.0.0"` (the script refuses `--apply` on any other version). **No developer token** — sunset 2026-09-09. API access = the level of the **Google Cloud project** that issued the OAuth client: Test (test accounts only) · Explorer (production, 2,880 ops/day, no `KeywordPlanIdeaService`) · Basic (15,000 ops/day, requires the project's brand verification) · Standard (unlimited, ~10 business days review). Upgrade: Cloud console → Google Ads API overview → *Upgrade access level*. A new project is at Test and cannot write to production. OAuth **Desktop** client + refresh token generated elsewhere; an app left in *Testing* status issues refresh tokens that expire after 7 days. Manager (MCC) account only if you reach the account through one |
 | Your obligations | Vendor ad policies, consumer-protection and advertising law apply to everything you publish. Regulated verticals (health, finance, legal, licensed trades) carry statutory constraints on top of vendor policy — clear the copy with the accountable human, not with this skill |
 
-Setup for the mutating path only: `python3 -m venv .venv && .venv/bin/pip install "google-ads==33.0.0"`, then export `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_REFRESH_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID`, `GOOGLE_ADS_CUSTOMER_ID`. That is the whole list: the script declares no env var it does not consume. Conversion goals are an **account-level** setting — configure them in the vendor UI before you enable. The dry-run needs none of this.
+Setup for the mutating path only: `python3 -m venv .venv && .venv/bin/pip install "google-ads==33.0.0"`, then export `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_REFRESH_TOKEN`, `GOOGLE_ADS_CUSTOMER_ID`, plus `GOOGLE_ADS_LOGIN_CUSTOMER_ID` **only** when access goes through a manager account. That is the whole list: the script declares no env var it does not consume. Conversion goals are an **account-level** setting — configure them in the vendor UI before you enable. The dry-run needs none of this.
 
 ## When to Use
 
@@ -190,7 +190,7 @@ Launch on `exact` + `phrase` only. Broad at launch spends the budget discovering
 | Create / edit campaign, ad group, RSA, targeting | SDK script + spec | Human go on the dry-run |
 | Pause / enable, set budget | Vendor UI or a narrow connector | Human, always |
 | Cut at the budget cap | Vendor-native script (§10) | Human installs it, sets the scope, reads the `scope:` log line, then turns the pause on. After that it is the one unattended action |
-| Offline conversions, reporting | Vendor-native (data manager UI, scheduled scripts) | Independent of the agent |
+| Offline conversions, reporting | Vendor-native: Data Manager API / UI (`UploadClickConversions` is closed to new adopters since 2026-06-15), scheduled scripts | Independent of the agent |
 
 Hybrid on purpose: write through the API where structure matters, keep caps and conversion ingestion native so they survive the agent being down, refactored, or wrong.
 

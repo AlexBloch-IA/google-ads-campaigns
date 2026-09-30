@@ -29,19 +29,25 @@ PREREQUISITES (mutating path only — the dry-run needs none of this):
   * A dedicated virtualenv with the pinned SDK: pip install "google-ads==33.0.0".
     build_client() refuses any other installed version: the SDK version fixes the API
     version, and an unreviewed upgrade is an unreviewed change to what --apply sends.
-  * A Google Ads manager (MCC) account, and a developer token with BASIC or STANDARD
-    API access approved by the vendor. The default TEST access level cannot write to a
-    production account, and approval takes days. Budget for that before you plan a launch.
-  * An OAuth desktop client and a refresh token, both generated outside this skill.
+  * No developer token: the vendor sunset them on 2026-09-09 (header ignored). API access
+    level is the one of the Google Cloud project that issued the OAuth client: Test (test
+    accounts only), Explorer (production, 2,880 ops/day), Basic (15,000 ops/day, needs Cloud
+    project brand verification), Standard (unlimited, ~10 business days review). Upgrade in
+    Cloud console -> Google Ads API overview -> "Upgrade access level". A new project starts
+    at Test and cannot write to a production account: budget the upgrade before a launch.
+  * An OAuth Desktop client in that project and a refresh token generated outside this
+    skill. With the OAuth consent screen in "Testing" status the refresh token expires
+    after 7 days: publish the app to "In production" for a durable token.
+  * A manager (MCC) account only if you reach the target account through one.
 
 ENV (mutating path only; read only after --dry-run has been ruled out; never hardcode,
 never print, never log):
-  GOOGLE_ADS_DEVELOPER_TOKEN
   GOOGLE_ADS_CLIENT_ID
   GOOGLE_ADS_CLIENT_SECRET
   GOOGLE_ADS_REFRESH_TOKEN
-  GOOGLE_ADS_LOGIN_CUSTOMER_ID   manager account id (dashes are stripped)
   GOOGLE_ADS_CUSTOMER_ID         target account id (dashes are stripped)
+  GOOGLE_ADS_LOGIN_CUSTOMER_ID   OPTIONAL — manager account id, only when access goes
+                                 through an MCC (dashes are stripped)
 
 The conversion action this campaign optimises toward is an ACCOUNT-level setting, not a
 campaign field this script writes. Configure conversion goals in the vendor UI before you
@@ -69,13 +75,15 @@ except ImportError:  # dry-run, --help and lint must work without the SDK instal
     GoogleAdsException = Exception  # type: ignore[assignment,misc]
 
 REQUIRED_ENV = [
-    "GOOGLE_ADS_DEVELOPER_TOKEN",
     "GOOGLE_ADS_CLIENT_ID",
     "GOOGLE_ADS_CLIENT_SECRET",
     "GOOGLE_ADS_REFRESH_TOKEN",
-    "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
     "GOOGLE_ADS_CUSTOMER_ID",
 ]
+# Only when the target account is reached through a manager (MCC) account.
+OPTIONAL_ENV = ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]
+# No developer token: sunset by the vendor on 2026-09-09, and google-ads >= 32 treats it as
+# optional. Access level comes from the Cloud project behind the OAuth client.
 
 GOOGLE_ADS_SDK_PIN = "33.0.0"
 
@@ -462,9 +470,14 @@ def load_env() -> dict:
     if missing:
         sys.exit(f"[ads-search] missing env vars: {', '.join(missing)}")
     env = {k: os.environ[k].strip() for k in REQUIRED_ENV}
+    for k in OPTIONAL_ENV:
+        if os.environ.get(k, "").strip():   # unset or blank = direct access, no MCC
+            env[k] = os.environ[k].strip()
     # The UI shows account ids as 123-456-7890; the API wants digits. Copy-pasting the UI
     # form otherwise fails deep in the mutate, after the idempotence and geo calls.
     for key in ("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID"):
+        if key not in env:
+            continue
         env[key] = env[key].replace("-", "").replace(" ", "")
         if not env[key].isdigit():
             sys.exit(f"[ads-search] {key} must be an account id in digits (dashes are fine)")
@@ -479,14 +492,22 @@ def build_client(env: dict):
     if installed != GOOGLE_ADS_SDK_PIN:
         sys.exit(f"[ads-search] google-ads {installed} installed, {GOOGLE_ADS_SDK_PIN} pinned. "
                  "Refusing --apply: bump the pin deliberately after reviewing the release notes.")
-    return GoogleAdsClient.load_from_dict({
-        "developer_token": env["GOOGLE_ADS_DEVELOPER_TOKEN"],
+    return GoogleAdsClient.load_from_dict(client_config(env))
+
+
+def client_config(env: dict) -> dict:
+    """SDK config. google-ads 33.0.0 config.py: _REQUIRED_KEYS = ("use_proto_plus",);
+    developer_token and login_customer_id are in _OPTIONAL_KEYS, and the metadata
+    interceptor only sends a header when the value is truthy."""
+    cfg = {
         "client_id": env["GOOGLE_ADS_CLIENT_ID"],
         "client_secret": env["GOOGLE_ADS_CLIENT_SECRET"],
         "refresh_token": env["GOOGLE_ADS_REFRESH_TOKEN"],
-        "login_customer_id": env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
         "use_proto_plus": True,
-    })
+    }
+    if env.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID"):
+        cfg["login_customer_id"] = env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]
+    return cfg
 
 
 def find_existing_campaign(client, customer_id: str, name: str) -> str | None:

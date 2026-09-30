@@ -93,12 +93,76 @@ expect("no flag = plan only, exit 0, no env read", run(json.dumps(BASE)), True, 
 expect("--dry-run = plan only", run(json.dumps(BASE), "--dry-run"), True, "END DRY-RUN")
 expect("--dry-run --apply together refused", run(json.dumps(BASE), "--dry-run", "--apply"), False)
 expect("--apply without env -> refuses before any client", run(json.dumps(BASE), "--apply"), False, "missing env vars")
-fake = dict(CLEAN_ENV, **{k: "1" for k in ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
-        "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN")},
-        GOOGLE_ADS_LOGIN_CUSTOMER_ID="12x", GOOGLE_ADS_CUSTOMER_ID="1")
-expect("--apply with non-numeric account id", run(json.dumps(BASE), "--apply", env=fake), False, "must be an account id")
+fake = dict(CLEAN_ENV, **{k: "x" for k in ("GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
+        "GOOGLE_ADS_REFRESH_TOKEN")}, GOOGLE_ADS_LOGIN_CUSTOMER_ID="12x", GOOGLE_ADS_CUSTOMER_ID="1")
+expect("--apply with non-numeric login id", run(json.dumps(BASE), "--apply", env=fake), False, "must be an account id")
 fake["GOOGLE_ADS_LOGIN_CUSTOMER_ID"] = "1"
 expect("--apply with SDK absent/unpinned", run(json.dumps(BASE), "--apply", env=fake), False, "google-ads")
+
+print("--- env: no developer token, optional MCC (load_env + client_config, in-process) ---")
+import importlib.util
+spec_mod = importlib.util.spec_from_file_location("ads_search", ROOT / "ads-search.py")
+ads = importlib.util.module_from_spec(spec_mod)
+spec_mod.loader.exec_module(ads)
+
+
+def env_case(label, env, ok, check=None):
+    global fails
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        got = ads.load_env()
+        cfg = ads.client_config(got)
+        good = ok and (check is None or check(got, cfg))
+        detail = f"keys={sorted(cfg)}"
+    except SystemExit as e:
+        good, detail = not ok, str(e)[:90]
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    fails += not good
+    print(f"{'PASS' if good else 'FAIL'}  {label}  {detail}")
+
+
+direct = dict(CLEAN_ENV, GOOGLE_ADS_CLIENT_ID="cid", GOOGLE_ADS_CLIENT_SECRET="sec",
+              GOOGLE_ADS_REFRESH_TOKEN="rt", GOOGLE_ADS_CUSTOMER_ID="123-456-7890")
+env_case("no developer token, no login id -> OK, direct access", direct, True,
+         lambda e, c: "developer_token" not in c and "login_customer_id" not in c
+         and e["GOOGLE_ADS_CUSTOMER_ID"] == "1234567890")
+env_case("login id blank -> treated as absent", dict(direct, GOOGLE_ADS_LOGIN_CUSTOMER_ID="  "), True,
+         lambda e, c: "login_customer_id" not in c)
+env_case("login id via MCC -> passed, dashes stripped", dict(direct, GOOGLE_ADS_LOGIN_CUSTOMER_ID="111-222-3333"),
+         True, lambda e, c: c["login_customer_id"] == "1112223333")
+env_case("stale developer token in env -> ignored, never read", dict(direct, GOOGLE_ADS_DEVELOPER_TOKEN="old"), True,
+         lambda e, c: "developer_token" not in c and "GOOGLE_ADS_DEVELOPER_TOKEN" not in e)
+env_case("login id non-numeric -> refused", dict(direct, GOOGLE_ADS_LOGIN_CUSTOMER_ID="abc"), False)
+for k in ("GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_CUSTOMER_ID"):
+    env_case(f"{k} missing -> refused", {x: v for x, v in direct.items() if x != k}, False)
+env_case("customer id blank -> refused", dict(direct, GOOGLE_ADS_CUSTOMER_ID=" "), False)
+
+# Real SDK check, offline (OAuth refresh stubbed).
+# Run with the pinned SDK: ADS_SDK_PYTHON=/path/to/venv/bin/python python3 tests/ads_search_test.py
+sdk_py = os.environ.get("ADS_SDK_PYTHON")
+if sdk_py:
+    # Credentials.refresh is stubbed: load_from_dict otherwise exchanges the refresh token
+    # over the network. Everything else (config validation, client init) is the real SDK.
+    code = ("import importlib.util,sys;from pathlib import Path;"
+            "import google.oauth2.credentials as oc;oc.Credentials.refresh=lambda self,req:None;"
+            f"s=importlib.util.spec_from_file_location('a',{str(ROOT / 'ads-search.py')!r});"
+            "a=importlib.util.module_from_spec(s);s.loader.exec_module(a);"
+            "from importlib.metadata import version;print('google-ads',version('google-ads'));"
+            "e={'GOOGLE_ADS_CLIENT_ID':'cid','GOOGLE_ADS_CLIENT_SECRET':'sec','GOOGLE_ADS_REFRESH_TOKEN':'rt'};"
+            "c=a.build_client(e);print('direct: developer_token=',c.developer_token,'login_customer_id=',c.login_customer_id);"
+            "e['GOOGLE_ADS_LOGIN_CUSTOMER_ID']='1112223333';c=a.build_client(e);"
+            "print('mcc: developer_token=',c.developer_token,'login_customer_id=',c.login_customer_id)")
+    r = subprocess.run([sdk_py, "-c", code], capture_output=True, text=True, env=CLEAN_ENV)
+    good = (r.returncode == 0 and "direct: developer_token= None login_customer_id= None" in r.stdout
+            and "mcc: developer_token= None login_customer_id= 1112223333" in r.stdout)
+    fails += not good
+    print(f"{'PASS' if good else 'FAIL'}  real SDK build_client without developer token\n{r.stdout}{r.stderr[-400:]}")
+else:
+    print("SKIP  real SDK check (set ADS_SDK_PYTHON to a venv python with the pinned google-ads)")
 expect("valid worldwide with note", run(mutate(lambda s: s.__setitem__("geo", {"worldwide": True, "note": "global SaaS"}))), True, "WORLDWIDE")
 expect("language_constant override", run(mutate(lambda s: (s.pop("language"), s.__setitem__("language_constant", "1005")))), True, "languageConstants/1005")
 
