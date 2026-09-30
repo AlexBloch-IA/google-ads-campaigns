@@ -1,6 +1,6 @@
 ---
 name: google-ads-campaigns
-description: Ship Google Ads search campaigns as reviewable JSON specs — offline dry-run, atomic create, PAUSED in code. Use when an agent builds or edits a campaign. Trigger on "create a Google Ads campaign", "search campaign spec", "ads dry-run".
+description: Google Ads search campaigns as reviewable JSON specs — offline plan, --apply creates PAUSED; opt-in budget-cap script pauses scoped campaigns. Use when an agent builds a campaign.
 metadata: {"clawdbot":{"emoji":"💸","requires":{"bins":["python3"]}}}
 ---
 
@@ -14,18 +14,21 @@ A campaign is a versioned artifact: an agent writes the spec, a human reads the 
 
 | Item | Reality |
 |---|---|
-| Default mode | `--dry-run` — no client built, **no environment variable read at all**, no network call |
+| Default mode | Plan only (no flag, or `--dry-run`) — no client built, **no environment variable read at all**, no network call |
+| Mutating mode | Only with the explicit `--apply` flag, after a human go on the plan. Omitting a flag can never create anything |
 | Dry-run output | Carries no account id and no credential. Safe to paste into a ticket for review |
 | Credentials | Env vars, read in `load_env()` on the mutating path only. Never hardcoded, never printed, never logged |
 | Persisted by `ads-search.py` | Nothing. Specs are files you already own; the script writes no state |
-| Persisted by `budget-cap-guard.js` (opt-in, runs in your ad account) | Appends one alert row per hourly breach to a spreadsheet **you** own: timestamp, status, spend, cap, action. No PII, no credential. Nothing is written while spend is under the cap |
-| Retention (enforced, not announced) | `pruneOldAlerts()` deletes alert rows older than `CONFIG.RETAIN_DAYS` (default **400**) on every run, breach or not. `0` = keep forever, an explicit opt-out. A figure nothing executes is not a retention policy |
+| `budget-cap-guard.js` — **live-account, opt-in, installed by a human** | Runs hourly in the ad account's own script runner, not in the agent. Reads month spend; at the cap it pauses **only** ENABLED campaigns whose name contains the required `NAME_CONTAINS` prefix, and only once a human sets `PAUSE_ON_CAP: true` (shipped `false`). There is no account-wide mode. The agent never installs, edits, or schedules it |
+| Written by `budget-cap-guard.js` | Creates **one tab it owns** (`budget-cap-guard`) in a dedicated spreadsheet you own, appends one row per hourly breach: timestamp, status, spend, cap, action, writer marker. No PII, no credential. Refuses to write into a tab that already exists with any other header |
+| Retention (enforced, not announced) | Every run deletes rows older than `CONFIG.RETAIN_DAYS` (default **400**) — only rows carrying its own writer marker, only in its own tab. `0` = keep forever, an explicit opt-out |
+| Invalid config | Missing cap, prefix, or sheet URL, a wrong type, or unreadable spend: the run **throws before any pause or write** and the script runner reports the failure. Never falls back to "every campaign" |
 | Leaves the machine | Only on the mutating path: the campaign tree, to the ad network you authenticated against |
 | Spend authority | None. Every campaign is created PAUSED. Going live is a human click in the vendor UI |
-| Prerequisites (mutating path) | `pip install google-ads`; a manager (MCC) account; a developer token with **basic or standard** API access approved by the vendor — the default *test* level cannot write to a production account and approval takes days; an OAuth desktop client and refresh token generated elsewhere |
+| Prerequisites (mutating path) | A dedicated virtualenv with `pip install "google-ads==33.0.0"` (the script refuses `--apply` on any other version); a manager (MCC) account; a developer token with **basic or standard** API access approved by the vendor — the default *test* level cannot write to a production account and approval takes days; an OAuth desktop client and refresh token generated elsewhere |
 | Your obligations | Vendor ad policies, consumer-protection and advertising law apply to everything you publish. Regulated verticals (health, finance, legal, licensed trades) carry statutory constraints on top of vendor policy — clear the copy with the accountable human, not with this skill |
 
-Setup for the mutating path only: `pip install google-ads`, then export `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_REFRESH_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID`, `GOOGLE_ADS_CUSTOMER_ID`. That is the whole list: the script declares no env var it does not consume. Conversion goals are an **account-level** setting — configure them in the vendor UI before you enable. The dry-run needs none of this.
+Setup for the mutating path only: `python3 -m venv .venv && .venv/bin/pip install "google-ads==33.0.0"`, then export `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_CLIENT_ID`, `GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_REFRESH_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID`, `GOOGLE_ADS_CUSTOMER_ID`. That is the whole list: the script declares no env var it does not consume. Conversion goals are an **account-level** setting — configure them in the vendor UI before you enable. The dry-run needs none of this.
 
 ## When to Use
 
@@ -33,10 +36,10 @@ Setup for the mutating path only: `pip install google-ads`, then export `GOOGLE_
 |---|---|
 | "build me a search campaign for X" | Write `<segment>.json` spec → dry-run → hand the plan to a human |
 | "review the campaign before launch" | `--dry-run`, paste the output, wait for an explicit go |
-| "create it / it's approved" | Run without `--dry-run`. Lands PAUSED. Say so out loud |
+| "create it / it's approved" | Run with `--apply`. Lands PAUSED. Say so out loud |
 | "make it live" / "unpause" | **Refuse.** Point to the vendor UI. This skill has no enable path |
 | "raise the budget" | Propose a spec diff. Never mutate budget on your own authority |
-| "we're overspending" | Budget cap script (§10), not the agent |
+| "we're overspending" | Budget cap script (§10), installed and scoped by a human — not the agent |
 
 ## 1. The spec is the artifact
 
@@ -49,11 +52,11 @@ One JSON file per segment. One segment = one campaign = one ad group cluster = o
 | `final_url` | url | The segment's landing page. Ad copy and LP must say the same thing |
 | `currency` | string | Descriptive only. Amounts are in the **account's** currency; nothing converts FX |
 | `geo.country_code` | string | **Required with any geo name.** Zone names resolve *within one country* (§6) |
-| `geo.locale` | string | Language of the zone names, e.g. `en` |
+| `geo.locale` | string | Language of the zone names. **Required with any geo name, no default** |
 | `geo.include` / `geo.exclude` | string[] | Plain zone **names**, resolved read-only at apply time (§6) |
 | `geo.worldwide` | bool | **The only way to target everywhere.** Requires `geo.note`. Omitting `geo.include` does *not* mean worldwide — it aborts (§6) |
 | `geo.note` | string | Why these zones. Reviewers read this first |
-| `language` | string | Maps to a language constant id |
+| `language` | string | **Required, no default.** `english` / `french` / `spanish` / `german`, or set `language_constant` (digits) for any other. Unknown values abort |
 | `bidding` | string | `MaximizeConversions`; add `target_cpa` only once there is data |
 | `monthly_budget` | number | The number the client agreed to |
 | `daily_budget` | number | **= monthly / 30.4.** Not /30, not /31 |
@@ -65,7 +68,9 @@ One JSON file per segment. One segment = one campaign = one ad group cluster = o
 | `negative_keywords` | string[] | Campaign-level negatives (§8) |
 | `extensions` | object | Sitelinks, callouts, structured snippets, call. Reviewed here, created in a later pass |
 
-Complete worked spec: **`campaign.example.json`** (`acme-widgets_us_search_demo`, 300/month → 9.87/day, 44 negatives, deliberately unrounded schedule).
+Complete worked spec: **`campaign.example.json`** (`acme-widgets_us_search_demo`, 300/month → 9.87/day, 44 negatives, deliberately unrounded schedule). Its US/English values are illustrative; nothing in the code defaults to them.
+
+Every field is type-checked before planning: a `null`, a string where a list belongs (`list("United States")` is 13 one-letter zones), a boolean budget (`float(True)` is 1.00), a `25:00` window — the plan aborts and lists every problem. Refuse, never coerce.
 
 Budget split across segments needs a rationale in the file, not in a chat message: *"acme-core 45% — biggest volume and strongest intent; acme-satellite 20% — narrower market, fewer zones."* A share without a reason is a number nobody can review.
 
@@ -101,7 +106,7 @@ python3 ads-search.py --spec campaign.example.json --dry-run
 # [ads-search] END DRY-RUN — nothing written.
 ```
 
-`--dry-run` returns **before** `build_client()` is ever called. It reads no environment variable at all — `load_env()` is the only place this script touches the environment, and it sits past the dry-run return. The SDK import is behind a tolerant `try/except`, so the plan renders with `google-ads` not installed.
+The plan (no flag, or `--dry-run`) returns **before** `build_client()` is ever called. It reads no environment variable at all — `load_env()` is the only place this script touches the environment, and it sits past the dry-run return. The SDK import is behind a tolerant `try/except`, so the plan renders with `google-ads` not installed.
 
 **This is architecture, not a convenience flag.** A full campaign — every keyword, every headline, every rounded slot, every micro — is reviewable by someone with **no secret provisioned at all**, and the output holds no account id, so it is safe to paste where the review happens. Keep the offline path pure: the moment a "harmless" env read sneaks in, you have re-coupled review to secrets and started printing identifiers into chat logs.
 
@@ -184,7 +189,7 @@ Launch on `exact` + `phrase` only. Broad at launch spends the budget discovering
 | Read state, spend, metrics | Read-only API queries or a reporting connector | None — reading is free |
 | Create / edit campaign, ad group, RSA, targeting | SDK script + spec | Human go on the dry-run |
 | Pause / enable, set budget | Vendor UI or a narrow connector | Human, always |
-| Cut at the budget cap | Vendor-native script (§10) | **None — the one automatic action** |
+| Cut at the budget cap | Vendor-native script (§10) | Human installs it, sets the scope, reads the `scope:` log line, then turns the pause on. After that it is the one unattended action |
 | Offline conversions, reporting | Vendor-native (data manager UI, scheduled scripts) | Independent of the agent |
 
 Hybrid on purpose: write through the API where structure matters, keep caps and conversion ingestion native so they survive the agent being down, refactored, or wrong.
@@ -194,21 +199,23 @@ Hybrid on purpose: write through the API where structure matters, keep caps and 
 `budget-cap-guard.js` runs **inside the ad account** on the vendor's own script runner, hourly:
 
 ```javascript
-var CONFIG = { HARD_CAP: 500, WARN_RATIO: 0.9, PAUSE_ON_CAP: true, NAME_CONTAINS: '',
-               SHEET_URL: 'https://docs.google.com/spreadsheets/d/sheet-id-example/edit' };
-// spend >= cap  -> pause every ENABLED campaign, append a CAP_REACHED row to the 'alerts' tab
-// spend >= 90%  -> append a NEAR_CAP row; the agent relays it
+var CONFIG = { HARD_CAP: null, WARN_RATIO: 0.9, NAME_CONTAINS: '', PAUSE_ON_CAP: false,
+               SHEET_URL: '', ALERTS_TAB: 'budget-cap-guard', RETAIN_DAYS: 400 };
+// shipped values THROW: HARD_CAP, NAME_CONTAINS and SHEET_URL are required
+// spend >= cap  -> PAUSE_ON_CAP ? pause ENABLED campaigns containing NAME_CONTAINS : alert only
+// spend >= 90%  -> append a NEAR_CAP row to its own tab; the agent relays it
 ```
 
-Three properties that make it trustworthy:
+Four properties that make it trustworthy:
 
 1. **It is not the agent.** You do not hand the brake to the driver. If the agent is broken, looping, or hallucinating a budget increase, the cap still fires — vendor scheduler, in the account, no dependency on your runtime.
-2. **It only ever subtracts.** It pauses; it cannot raise. Automate nothing whose worst case is "we spent more."
-3. **It holds no secret.** It writes a row to a sheet you own; the agent reads the sheet and relays. No token, no webhook, no credential in a script pasted into a third-party UI. `RETAIN_DAYS` prunes those rows on every run — the retention is code, not a sentence.
+2. **Its only account action is a pause, on a named scope.** It cannot raise a budget or enable anything. `NAME_CONTAINS` is mandatory and validated (`[A-Za-z0-9_.-]{3,120}`): there is no empty-means-everything mode. Its other writes are rows in the one tab it created, pruned by its own marker.
+3. **It fails closed.** Missing cap, empty prefix, placeholder sheet, `"500"` as a string, spend that is `null` or `NaN`: the run throws before any pause or write. A gate that guesses on bad input is worse than no gate.
+4. **It holds no secret.** No token, no webhook, no credential in a script pasted into a third-party UI.
 
 And two costs, because a cap sold as free is a cap nobody scopes:
 
-- **Blast radius = the whole account.** It pauses *every* ENABLED campaign, including brand, shopping, and campaigns you never created. Set `NAME_CONTAINS` to a naming prefix on a shared account.
+- **Measured on the whole account, applied to the scope.** The cap compares *account* spend (conservative); the pause hits only the prefixed campaigns. Others keep spending — size `HARD_CAP` with that in mind.
 - **No automatic recovery.** Spend resets on the 1st; nothing re-enables. Re-activation is deliberately human — so put a calendar reminder next to it, or the failure is silent: "we stopped spending for nine days and nobody noticed."
 
 Set the media budget under the cap (e.g. 450 against a 500 cap) so the buffer absorbs normal variance and the cap only fires on something genuinely wrong. Media is billed by the ad network to the payment method on the account, separate from any agency fee.
@@ -259,7 +266,7 @@ VERDICT: ✅ READY — awaiting human go
 
 ## Scope
 
-**This skill ONLY:** turns a JSON spec into a reviewable plan offline, with no env read and no identifier in the output · creates one campaign tree in one atomic mutate, always PAUSED · searches by name before creating · aborts rather than shipping unresolved or unstated-worldwide geo targeting · reports rounding, micros conversion, and every count or character limit that would change the ad between the plan and the create · documents a cap that lives outside the agent, writes only spend rows to a sheet you own, and prunes them on a retention it actually executes.
+**This skill ONLY:** turns a JSON spec into a reviewable plan offline, with no env read and no identifier in the output · creates one campaign tree in one atomic mutate, always PAUSED · searches by name before creating · aborts rather than shipping unresolved or unstated-worldwide geo targeting · reports rounding, micros conversion, and every count or character limit that would change the ad between the plan and the create · ships an opt-in cap that a human installs outside the agent, pauses only a mandatory named scope, fails closed on any invalid input, writes only to a tab it created, and prunes only its own marked rows.
 
 **This skill NEVER:** enables a campaign · raises a budget · edits live campaigns without a human go · touches display or performance-max inventory · writes copy for a regulated claim without a named human reviewer · hardcodes, prints, or transmits a credential or an account id · bypasses any vendor control, review queue, rate limit, or policy enforcement — if the platform blocks or disapproves something, that is the answer, and a human takes it from there.
 

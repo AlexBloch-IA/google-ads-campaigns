@@ -1,10 +1,10 @@
 # Google Ads Campaigns
 
-> Ship Google Ads search campaigns as reviewable JSON specs — offline dry-run, atomic create, PAUSED in code. Use when an agent builds or edits a campaign. Trigger on "create a Google Ads campaign", "search campaign spec", "ads dry-run".
+> Google Ads search campaigns as reviewable JSON specs — offline plan by default, `--apply` creates PAUSED; opt-in budget-cap script pauses a mandatory named scope and fails closed.
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](https://opensource.org/licenses/MIT-0)
 [![ClawHub](https://img.shields.io/badge/ClawHub-Published-orange)](https://clawhub.ai/alexbloch-ia/skills/google-ads-campaigns)
-[![Version](https://img.shields.io/badge/version-1.0.1-green)](https://clawhub.ai/alexbloch-ia/skills/google-ads-campaigns)
+[![Version](https://img.shields.io/badge/version-1.1.0-green)](https://clawhub.ai/alexbloch-ia/skills/google-ads-campaigns)
 
 A Claude Code / [OpenClaw](https://openclaw.ai) skill, published on [ClawHub](https://clawhub.ai/alexbloch-ia/skills/google-ads-campaigns). Portable operating doctrine — drop it into an agent's skills directory and follow it.
 
@@ -30,34 +30,10 @@ The full, load-bearing detail lives in [`SKILL.md`](./SKILL.md).
 
 ## Install
 
-### Via ClawHub (recommended)
-
-👉 **<https://clawhub.ai/alexbloch-ia/skills/google-ads-campaigns>**
+Install through ClawHub only — the registry serves the reviewed, scanned artifact. The slug is shared with another publisher, so name the owner:
 
 ```bash
-clawhub install google-ads-campaigns
-# or, from an OpenClaw agent:
-openclaw skills install @alexbloch-ia/google-ads-campaigns
-```
-
-### Via this repository (manual)
-
-```bash
-git clone https://github.com/AlexBloch-IA/google-ads-campaigns.git
-cd google-ads-campaigns
-./install.sh
-```
-
-The script copies the full skill payload into every supported stack it finds:
-
-- `~/.claude/skills/google-ads-campaigns/` (Claude Code)
-- `~/.openclaw/skills/google-ads-campaigns/` (OpenClaw)
-
-### Manual copy
-
-```bash
-mkdir -p ~/.claude/skills/google-ads-campaigns
-cp -R SKILL.md ~/.claude/skills/google-ads-campaigns/   # plus scripts/, references/, templates/… if present
+clawhub install @alexbloch-ia/google-ads-campaigns
 ```
 
 ---
@@ -70,9 +46,9 @@ google-ads-campaigns/
 ├── ads-search.py
 ├── budget-cap-guard.js
 ├── campaign.example.json
+├── tests/                  (hostile-fixture tests, not published)
 ├── README.md
-├── LICENSE
-└── install.sh
+└── LICENSE
 ```
 
 ---

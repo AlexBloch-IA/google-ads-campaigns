@@ -6,15 +6,16 @@ Reference implementation for the `google-ads-campaigns` skill. The vendor here i
 the main search ad network (google-ads-python SDK); the shape is vendor-agnostic:
 spec in -> plan -> (dry-run report | one atomic create).
 
-TWO MODES, and only one of them touches the network:
+TWO MODES, and only one of them touches the network. Plan is the DEFAULT; the mutating
+path needs the explicit --apply flag — omitting a flag can never create anything.
 
-  --dry-run   Renders the full plan and exits. Does NOT build the API client, does NOT
+  (default)   Same as --dry-run. Renders the full plan and exits. Does NOT build the API client, does NOT
               read a single environment variable, makes zero network calls. This is the
               mode a human reviews. It runs on a laptop with no secret provisioned at all,
               and its output is safe to paste: no account id, no credential, no identifier.
 
-  (no flag)   Mutating path. Requires env vars below. Never run this without a human
-              "go" on the dry-run output first.
+  --apply     Mutating path. Requires env vars below and google-ads==GOOGLE_ADS_SDK_PIN.
+              Never run this without a human "go" on the dry-run output first.
 
 GUARANTEES ENFORCED IN CODE (not in a prompt):
   * Campaign status is PAUSED, always, on create. There is no flag to make it ENABLED.
@@ -25,7 +26,9 @@ GUARANTEES ENFORCED IN CODE (not in a prompt):
   * Idempotent: a campaign with the same name is never created twice.
 
 PREREQUISITES (mutating path only — the dry-run needs none of this):
-  * pip install google-ads
+  * A dedicated virtualenv with the pinned SDK: pip install "google-ads==33.0.0".
+    build_client() refuses any other installed version: the SDK version fixes the API
+    version, and an unreviewed upgrade is an unreviewed change to what --apply sends.
   * A Google Ads manager (MCC) account, and a developer token with BASIC or STANDARD
     API access approved by the vendor. The default TEST access level cannot write to a
     production account, and approval takes days. Budget for that before you plan a launch.
@@ -46,7 +49,7 @@ enable. This script deliberately declares no env var it does not consume.
 
 Usage:
   ads-search.py --spec campaign.example.json --dry-run     # offline, no auth
-  ads-search.py --spec campaign.example.json               # atomic create, PAUSED
+  ads-search.py --spec campaign.example.json --apply       # atomic create, PAUSED
 """
 from __future__ import annotations
 
@@ -74,8 +77,11 @@ REQUIRED_ENV = [
     "GOOGLE_ADS_CUSTOMER_ID",
 ]
 
+GOOGLE_ADS_SDK_PIN = "33.0.0"
+
+# No default language and no default locale: the spec states its audience, or the plan aborts.
+# Languages outside this map: set "language_constant" (digits) in the spec instead.
 LANGUAGE_CONSTANTS = {"english": "1000", "french": "1002", "spanish": "1003", "german": "1001"}
-DEFAULT_LANGUAGE_CONSTANT = "1000"
 
 # Search partners are off by default: you did not review those placements.
 TARGET_SEARCH_PARTNERS = False
@@ -94,6 +100,26 @@ DAYS = {"MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUN
 MATCH_MARKER = {"EXACT": "[ ]", "PHRASE": '" "', "BROAD": "   "}
 _MIN_ENUM = {0: "ZERO", 15: "FIFTEEN", 30: "THIRTY", 45: "FORTY_FIVE"}
 _MIN_INT = {v: k for k, v in _MIN_ENUM.items()}
+HHMM_RE = re.compile(r"([01][0-9]|2[0-4]):([0-5][0-9])")
+
+
+def _day_enum(enums, day: str):
+    """Explicit allowlist: a spec string is a dict key here, never an attribute name."""
+    e = enums.DayOfWeekEnum
+    return {"MONDAY": e.MONDAY, "TUESDAY": e.TUESDAY, "WEDNESDAY": e.WEDNESDAY,
+            "THURSDAY": e.THURSDAY, "FRIDAY": e.FRIDAY, "SATURDAY": e.SATURDAY,
+            "SUNDAY": e.SUNDAY}[day]
+
+
+def _minute_enum(enums, name: str):
+    e = enums.MinuteOfHourEnum
+    return {"ZERO": e.ZERO, "FIFTEEN": e.FIFTEEN, "THIRTY": e.THIRTY,
+            "FORTY_FIVE": e.FORTY_FIVE}[name]
+
+
+def _match_enum(enums, name: str):
+    e = enums.KeywordMatchTypeEnum
+    return {"EXACT": e.EXACT, "PHRASE": e.PHRASE, "BROAD": e.BROAD}[name]
 
 
 # --- pure helpers: no network, no secret, shared by both modes ------------------------
@@ -121,8 +147,10 @@ def hhmm_to_slot(value: str, *, is_end: bool) -> tuple[int, str, bool]:
     Rounding an end DOWN would silently shorten your day; rounding a start UP would
     silently open it early. Direction is not cosmetic.
     """
-    hh, mm = value.split(":")
-    hour, minute, rounded = int(hh), int(mm), False
+    m = HHMM_RE.fullmatch(value) if isinstance(value, str) else None
+    if not m or (m.group(1) == "24" and m.group(2) != "00"):
+        sys.exit(f"[ads-search] schedule time must be HH:MM between 00:00 and 24:00: {value!r}")
+    hour, minute, rounded = int(m.group(1)), int(m.group(2)), False
     if is_end:
         q = math.ceil(minute / 15) * 15
         if q == 60:
@@ -184,8 +212,10 @@ def normalize_schedule(sched: dict | None) -> tuple[list[dict], list[str]]:
     if not sched:
         return crits, notes
     for win in sched.get("windows", []):
-        sh, sm, r1 = hhmm_to_slot(win["start"], is_end=False)
-        eh, em, r2 = hhmm_to_slot(win["end"], is_end=True)
+        sh, sm, r1 = hhmm_to_slot(win.get("start"), is_end=False)
+        eh, em, r2 = hhmm_to_slot(win.get("end"), is_end=True)
+        if (sh, _MIN_INT[sm]) >= (eh, _MIN_INT[em]):
+            sys.exit(f"[ads-search] schedule window ends before it starts: {win.get('start')}-{win.get('end')}")
         if r1 or r2:
             notes.append(f"{win['start']}-{win['end']} rounded -> {sh:02d}:{_MIN_INT[sm]:02d}"
                          f"/{eh:02d}:{_MIN_INT[em]:02d} (quarter-hour grid)")
@@ -198,11 +228,76 @@ def normalize_schedule(sched: dict | None) -> tuple[list[dict], list[str]]:
     return crits, notes
 
 
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _str_list(v) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)
+
+
+def validate_spec(spec) -> list[str]:
+    """Type gate. A null, a string where a list belongs, a boolean budget: refuse, never coerce.
+    (list("United States") is 13 one-letter zones; float(True) is a 1.00 budget.)"""
+    if not isinstance(spec, dict):
+        return ["spec must be a JSON object"]
+    e: list[str] = []
+    for f in ("campaign", "final_url", "language"):
+        if not isinstance(spec.get(f), str) or not spec[f].strip():
+            if not (f == "language" and isinstance(spec.get("language_constant"), str)):
+                e.append(f"{f} must be a non-empty string")
+    if isinstance(spec.get("final_url"), str) and not spec["final_url"].startswith("https://"):
+        e.append("final_url must start with https://")
+    if not _is_num(spec.get("daily_budget")) or spec["daily_budget"] <= 0:
+        e.append("daily_budget must be a number > 0")
+    if "monthly_budget" in spec and (not _is_num(spec["monthly_budget"]) or spec["monthly_budget"] <= 0):
+        e.append("monthly_budget must be a number > 0")
+    if "language_constant" in spec and not (isinstance(spec["language_constant"], str)
+                                            and spec["language_constant"].isdigit()):
+        e.append("language_constant must be a string of digits")
+    geo = spec.get("geo")
+    if not isinstance(geo, dict):
+        e.append("geo must be an object")
+    else:
+        for k in ("include", "exclude"):
+            if k in geo and not _str_list(geo[k]):
+                e.append(f"geo.{k} must be a list of non-empty strings")
+        if "worldwide" in geo and not isinstance(geo["worldwide"], bool):
+            e.append("geo.worldwide must be true or false")
+        if geo.get("include") or geo.get("exclude"):
+            for k in ("country_code", "locale"):
+                if not isinstance(geo.get(k), str) or not geo[k].strip():
+                    e.append(f"geo.{k} is required with geo names (no default)")
+    ags = spec.get("ad_groups")
+    if not isinstance(ags, list) or not ags or not all(isinstance(a, dict) for a in ags):
+        e.append("ad_groups must be a non-empty list of objects")
+    else:
+        for i, ag in enumerate(ags):
+            kw = ag.get("keywords", {})
+            if not isinstance(kw, dict) or any(not isinstance(kw.get(m, []), list) or
+                                               not all(isinstance(x, str) for x in kw.get(m, []))
+                                               for m in ("exact", "phrase", "broad")):
+                e.append(f"ad_groups[{i}].keywords must map exact/phrase/broad to lists of strings")
+            rsa = ag.get("rsa", {})
+            if not isinstance(rsa, dict) or any(not isinstance(rsa.get(m, []), list) or
+                                                not all(isinstance(x, str) for x in rsa.get(m, []))
+                                                for m in ("headlines", "descriptions", "paths")):
+                e.append(f"ad_groups[{i}].rsa must map headlines/descriptions/paths to lists of strings")
+    if "negative_keywords" in spec and not _str_list(spec["negative_keywords"]):
+        e.append("negative_keywords must be a list of non-empty strings")
+    sched = spec.get("ad_schedule")
+    if sched is not None and (not isinstance(sched, dict) or not isinstance(sched.get("windows", []), list)
+                              or not all(isinstance(w, dict) and _str_list(w.get("days"))
+                                         for w in sched.get("windows", []))):
+        e.append("ad_schedule.windows must be a list of objects with a non-empty days list")
+    return e
+
+
 def build_plan(spec: dict) -> dict:
     """Spec -> normalized plan. Pure. This is what the human actually reviews."""
-    for field in ("campaign", "final_url", "daily_budget"):
-        if not spec.get(field):
-            sys.exit(f"[ads-search] spec missing required field: {field}")
+    problems = validate_spec(spec)
+    if problems:
+        sys.exit("[ads-search] invalid spec, nothing planned:\n  - " + "\n  - ".join(problems))
     if not CAMPAIGN_NAME_RE.fullmatch(spec["campaign"]):
         sys.exit(f"[ads-search] campaign name must match {CAMPAIGN_NAME_RE.pattern} "
                  f"(naming convention <segment>_<region>_<channel>_<offer>): {spec['campaign']!r}")
@@ -237,7 +332,11 @@ def build_plan(spec: dict) -> dict:
                  "explicitly: \"geo\": {\"worldwide\": true, \"note\": \"<why>\"}")
     if geo.get("worldwide") and not (geo.get("note") or "").strip():
         sys.exit("[ads-search] geo.worldwide requires geo.note explaining why worldwide is intended")
-    lang = (spec.get("language") or "english").strip().lower()
+    lang = (spec.get("language") or "").strip().lower()
+    lang_const = spec.get("language_constant") or LANGUAGE_CONSTANTS.get(lang)
+    if not lang_const:
+        sys.exit(f"[ads-search] unknown language {lang!r}: use one of {sorted(LANGUAGE_CONSTANTS)} "
+                 "or set \"language_constant\" (digits) in the spec. No silent fallback.")
     return {
         "campaign_name": spec["campaign"],
         "segment": spec.get("segment"),
@@ -248,12 +347,12 @@ def build_plan(spec: dict) -> dict:
         "target_cpa": spec.get("target_cpa"),
         "currency": spec.get("currency", "(account currency)"),
         "language": lang,
-        "language_constant": LANGUAGE_CONSTANTS.get(lang, DEFAULT_LANGUAGE_CONSTANT),
+        "language_constant": lang_const,
         "geo_include": list(geo.get("include", [])),
         "geo_exclude": list(geo.get("exclude", [])),
         "geo_worldwide": bool(geo.get("worldwide")),
         "geo_country": (geo.get("country_code") or "").strip().upper(),
-        "geo_locale": (geo.get("locale") or "en").strip().lower(),
+        "geo_locale": (geo.get("locale") or "").strip().lower(),
         "geo_note": geo.get("note"),
         "ad_schedule": spec.get("ad_schedule"),
         "ad_groups": groups,
@@ -350,7 +449,7 @@ def render_dry_run(plan: dict) -> int:
         if ext.get("call"):
             print(f"      call extension      : {ext['call'].get('phone')} ({ext['call'].get('country')})")
     print("=" * 74)
-    print("[ads-search] END DRY-RUN — nothing written. Real create = same command without --dry-run,")
+    print("[ads-search] END DRY-RUN — nothing written. Real create = same command with --apply,")
     print("             only after a human has read this plan and said go.")
     return 0
 
@@ -374,7 +473,12 @@ def load_env() -> dict:
 
 def build_client(env: dict):
     if GoogleAdsClient is None:
-        sys.exit("[ads-search] SDK not installed: pip install google-ads")
+        sys.exit(f"[ads-search] SDK not installed: pip install \"google-ads=={GOOGLE_ADS_SDK_PIN}\" in a venv")
+    from importlib.metadata import version as _pkg_version
+    installed = _pkg_version("google-ads")
+    if installed != GOOGLE_ADS_SDK_PIN:
+        sys.exit(f"[ads-search] google-ads {installed} installed, {GOOGLE_ADS_SDK_PIN} pinned. "
+                 "Refusing --apply: bump the pin deliberately after reviewing the release notes.")
     return GoogleAdsClient.load_from_dict({
         "developer_token": env["GOOGLE_ADS_DEVELOPER_TOKEN"],
         "client_id": env["GOOGLE_ADS_CLIENT_ID"],
@@ -428,7 +532,7 @@ def resolve_geo(client, names: list[str], *, locale: str,
     out: list[str] = []
     matched: set[str] = set()
     for s in svc.suggest_geo_target_constants(request=req).geo_target_constant_suggestions:
-        term = (getattr(s, "suggestion_search_term", "") or "").strip().casefold()
+        term = (s.suggestion_search_term or "").strip().casefold()
         if not term or term not in wanted:
             continue  # unattributable, or a zone nobody asked for
         if s.geo_target_constant and s.geo_target_constant.resource_name:
@@ -498,11 +602,11 @@ def build_operations(client, customer_id: str, plan: dict,
         op = client.get_type("MutateOperation")
         k = op.campaign_criterion_operation.create
         k.campaign = campaign_rn
-        k.ad_schedule.day_of_week = getattr(enums.DayOfWeekEnum, s["day"])
+        k.ad_schedule.day_of_week = _day_enum(enums, s["day"])
         k.ad_schedule.start_hour = s["sh"]
-        k.ad_schedule.start_minute = getattr(enums.MinuteOfHourEnum, s["sm"])
+        k.ad_schedule.start_minute = _minute_enum(enums, s["sm"])
         k.ad_schedule.end_hour = s["eh"]
-        k.ad_schedule.end_minute = getattr(enums.MinuteOfHourEnum, s["em"])
+        k.ad_schedule.end_minute = _minute_enum(enums, s["em"])
         ops.append(op)
 
     for neg in plan["negatives"]:
@@ -533,7 +637,7 @@ def build_operations(client, customer_id: str, plan: dict,
             k.ad_group = ag_rn
             k.status = enums.AdGroupCriterionStatusEnum.ENABLED
             k.keyword.text = text
-            k.keyword.match_type = getattr(enums.KeywordMatchTypeEnum, mt)
+            k.keyword.match_type = _match_enum(enums, mt)
             ops.append(op)
 
         op = client.get_type("MutateOperation")
@@ -589,11 +693,10 @@ def apply_campaign(client, customer_id: str, plan: dict) -> int:
     svc = client.get_service("GoogleAdsService")
     resp = svc.mutate(customer_id=customer_id, mutate_operations=ops)
     for r in resp.mutate_operation_responses:
-        for field in ("campaign_budget_result", "campaign_result", "ad_group_result",
-                      "campaign_criterion_result", "ad_group_criterion_result",
-                      "ad_group_ad_result"):
-            res = getattr(r, field)
-            if res and getattr(res, "resource_name", ""):
+        for res in (r.campaign_budget_result, r.campaign_result, r.ad_group_result,
+                    r.campaign_criterion_result, r.ad_group_criterion_result,
+                    r.ad_group_ad_result):
+            if res and res.resource_name:
                 print(f"    created: {res.resource_name}")
                 break
     print("[ads-search] Campaign created PAUSED. Going live is a human action in the UI.")
@@ -603,8 +706,11 @@ def apply_campaign(client, customer_id: str, plan: dict) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(description="Create one paid search campaign (SEARCH, PAUSED) from a JSON spec.")
     p.add_argument("--spec", required=True, help="path to the campaign spec JSON")
-    p.add_argument("--dry-run", action="store_true",
-                   help="render the plan and exit: no client, no auth, no network")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="render the plan and exit (the default): no client, no auth, no network")
+    mode.add_argument("--apply", action="store_true",
+                      help="create the campaign PAUSED. Only after a human go on the dry-run")
     args = p.parse_args()
 
     path = Path(args.spec)
@@ -617,7 +723,7 @@ def main() -> int:
 
     plan = build_plan(spec)
 
-    if args.dry_run:
+    if not args.apply:
         # Offline on purpose, and pure on purpose: nothing below this line has run, no
         # environment variable has been touched. A plan is reviewable on any machine, with
         # zero secret provisioned — and the output carries no account identifier to leak.

@@ -4,6 +4,7 @@
   "final_url": "https://example.com/lp/acme-widgets",
   "network": "Search",
   "language": "english",
+  "language_note": "Illustrative only. language and geo.locale are required per spec and have no default: set them to your audience.",
   "currency": "USD",
   "geo": {
     "country_code": "US",

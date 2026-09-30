@@ -5,3 +5,4 @@ install.sh
 CHANGELOG.md
 .github/
 .DS_Store
+tests/
